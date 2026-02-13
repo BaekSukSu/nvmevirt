@@ -167,6 +167,8 @@ struct nvmev_config {
 	unsigned int write_delay; // ns
 	unsigned int write_time; // ns
 	unsigned int write_trailing; // ns
+
+	unsigned int gc_policy;
 };
 
 struct nvmev_io_work {

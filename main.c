@@ -111,6 +111,10 @@ module_param(cpus, charp, 0444);
 MODULE_PARM_DESC(cpus, "CPU list for process, completion(int.) threads, Seperated by Comma(,)");
 module_param(debug, uint, 0644);
 
+static unsigned int gc_policy = 0;
+module_param(gc_policy, uint, 0444);
+MODULE_PARM_DESC(gc_policy, "GC Policy: 0=Greedy, 1=Cost-Benefit");
+
 // Returns true if an event is processed
 static bool nvmev_proc_dbs(void)
 {
@@ -496,6 +500,7 @@ static bool __load_configs(struct nvmev_config *config)
 	config->write_trailing = write_trailing;
 	config->nr_io_units = nr_io_units;
 	config->io_unit_shift = io_unit_shift;
+	config->gc_policy = gc_policy;
 
 	config->nr_io_workers = 0;
 	config->cpu_nr_dispatcher = -1;

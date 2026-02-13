@@ -24,6 +24,7 @@ struct line {
 	struct list_head entry;
 	/* position in the priority queue for victim lines */
 	size_t pos;
+	uint64_t create_timestamp; /* timestamp when line entered victim pqueue (ns) */
 };
 
 /* wp: record next write addr */

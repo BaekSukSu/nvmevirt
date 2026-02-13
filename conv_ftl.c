@@ -258,6 +258,7 @@ static void advance_write_pointer(struct conv_ftl *conv_ftl, uint32_t io_type)
 		NVMEV_ASSERT(wpp->curline->vpc >= 0 && wpp->curline->vpc < spp->pgs_per_line);
 		/* there must be some invalid pages in this line */
 		NVMEV_ASSERT(wpp->curline->ipc > 0);
+		wpp->curline->create_timestamp = local_clock();
 		pqueue_insert(lm->victim_line_pq, wpp->curline);
 		lm->victim_line_cnt++;
 	}
@@ -518,6 +519,7 @@ static void mark_page_invalid(struct conv_ftl *conv_ftl, struct ppa *ppa)
 	/* Adjust the position of the victime line in the pq under over-writes */
 	if (line->pos) {
 		/* Note that line->vpc will be updated by this call */
+		line->create_timestamp = local_clock();
 		pqueue_change_priority(lm->victim_line_pq, line->vpc - 1, line);
 	} else {
 		line->vpc--;
@@ -527,6 +529,7 @@ static void mark_page_invalid(struct conv_ftl *conv_ftl, struct ppa *ppa)
 		/* move line: "full" -> "victim" */
 		list_del_init(&line->entry);
 		lm->full_line_cnt--;
+		line->create_timestamp = local_clock();
 		pqueue_insert(lm->victim_line_pq, line);
 		lm->victim_line_cnt++;
 	}
@@ -642,22 +645,107 @@ static uint64_t gc_write_page(struct conv_ftl *conv_ftl, struct ppa *old_ppa)
 	return 0;
 }
 
+/*
+ * Age-leveling for cost-benefit GC policy.
+ * Converts elapsed time (ns) to a discrete level (1-7).
+ */
+#define AGE_LEVEL_1_NS (2ULL  * 1000000000ULL)
+#define AGE_LEVEL_2_NS (5ULL  * 1000000000ULL)
+#define AGE_LEVEL_3_NS (10ULL * 1000000000ULL)
+#define AGE_LEVEL_4_NS (40ULL * 1000000000ULL)
+#define AGE_LEVEL_5_NS (100ULL * 1000000000ULL)
+#define AGE_LEVEL_6_NS (250ULL * 1000000000ULL)
+
+static unsigned int get_age_level(uint64_t age_ns)
+{
+	if (age_ns < AGE_LEVEL_1_NS) return 1;
+	if (age_ns < AGE_LEVEL_2_NS) return 2;
+	if (age_ns < AGE_LEVEL_3_NS) return 3;
+	if (age_ns < AGE_LEVEL_4_NS) return 4;
+	if (age_ns < AGE_LEVEL_5_NS) return 5;
+	if (age_ns < AGE_LEVEL_6_NS) return 6;
+	return 7;
+}
+
 static struct line *select_victim_line(struct conv_ftl *conv_ftl, bool force)
 {
 	struct ssdparams *spp = &conv_ftl->ssd->sp;
 	struct line_mgmt *lm = &conv_ftl->lm;
 	struct line *victim_line = NULL;
+	uint32_t policy = nvmev_vdev->config.gc_policy;
 
-	victim_line = pqueue_peek(lm->victim_line_pq);
-	if (!victim_line) {
-		return NULL;
+	if (policy == 0) {
+		/* Greedy: pick line with smallest vpc (min-heap top) */
+		victim_line = pqueue_peek(lm->victim_line_pq);
+		if (!victim_line)
+			return NULL;
+
+		if (!force && (victim_line->vpc > (spp->pgs_per_line / 8)))
+			return NULL;
+
+		pqueue_pop(lm->victim_line_pq);
+	} else {
+		/* Cost-Benefit: scan all victims, pick max value */
+		pqueue_t *pq = lm->victim_line_pq;
+		size_t pq_sz = pqueue_size(pq);
+		struct line *best_line = NULL;
+		uint64_t max_value_num = 0;
+		uint64_t max_value_den = 1;
+		uint64_t now = local_clock();
+		size_t i;
+
+		if (pq_sz == 0)
+			return NULL;
+
+		/*
+		 * value = (1-u) * age / (2u)
+		 * where u = vpc / pgs_per_line, age = get_age_level(now - timestamp)
+		 *
+		 * Rewriting with integers:
+		 *   value = (pgs_per_line - vpc) * age_level / (2 * vpc)
+		 *
+		 * Compare a/b > c/d  <=>  a*d > c*b  (all positive)
+		 */
+		for (i = 1; i <= pq_sz; i++) {
+			struct line *cl = (struct line *)pq->d[i];
+			uint64_t invalid_pgs;
+			unsigned int age_level;
+			uint64_t num, den;
+
+			if (!cl)
+				continue;
+
+			/* vpc == 0 means all invalid -> best possible victim */
+			if (cl->vpc == 0) {
+				best_line = cl;
+				break;
+			}
+
+			invalid_pgs = spp->pgs_per_line - cl->vpc;
+			age_level = get_age_level(now - cl->create_timestamp);
+
+			/* value = invalid_pgs * age_level / (2 * vpc) */
+			num = invalid_pgs * age_level;
+			den = 2ULL * cl->vpc;
+
+			/* Compare: num/den > max_value_num/max_value_den */
+			if (best_line == NULL || num * max_value_den > max_value_num * den) {
+				max_value_num = num;
+				max_value_den = den;
+				best_line = cl;
+			}
+		}
+
+		victim_line = best_line;
+		if (!victim_line)
+			return NULL;
+
+		if (!force && (victim_line->vpc > (spp->pgs_per_line / 8)))
+			return NULL;
+
+		pqueue_remove(pq, victim_line);
 	}
 
-	if (!force && (victim_line->vpc > (spp->pgs_per_line / 8))) {
-		return NULL;
-	}
-
-	pqueue_pop(lm->victim_line_pq);
 	victim_line->pos = 0;
 	lm->victim_line_cnt--;
 
