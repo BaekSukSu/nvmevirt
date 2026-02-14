@@ -66,6 +66,10 @@ struct conv_ftl {
 	struct write_pointer gc_wp;
 	struct line_mgmt lm;
 	struct write_flow_control wfc;
+
+	/* WAF measurement counters */
+	uint64_t user_write_count;  /* pages written by user IO */
+	uint64_t gc_write_count;    /* pages copied by GC */
 };
 
 void conv_init_namespace(struct nvmev_ns *ns, uint32_t id, uint64_t size, void *mapped_addr,
@@ -75,5 +79,8 @@ void conv_remove_namespace(struct nvmev_ns *ns);
 
 bool conv_proc_nvme_io_cmd(struct nvmev_ns *ns, struct nvmev_request *req,
 			   struct nvmev_result *ret);
+
+void conv_get_gc_stat(struct nvmev_ns *ns, uint64_t *user_writes, uint64_t *gc_writes);
+void conv_reset_gc_stat(struct nvmev_ns *ns);
 
 #endif

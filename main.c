@@ -345,6 +345,36 @@ static int __proc_file_read(struct seq_file *m, void *data)
 		}
 		seq_printf(m, "total: %u %u %u %llu\n", nr_in_flight, nr_dispatch, nr_dispatched,
 			   total_io);
+	} else if (strcmp(filename, "gc_stat") == 0) {
+		struct nvmev_ns *ns = nvmev_vdev->ns;
+		uint64_t user_writes = 0, gc_writes = 0;
+		uint64_t total_writes;
+		uint64_t waf_int, waf_frac;
+		int i;
+
+		for (i = 0; i < nvmev_vdev->nr_ns; i++) {
+			uint64_t uw = 0, gw = 0;
+			if (NS_SSD_TYPE(i) == SSD_TYPE_CONV) {
+				conv_get_gc_stat(&ns[i], &uw, &gw);
+				user_writes += uw;
+				gc_writes += gw;
+			}
+		}
+
+		total_writes = user_writes + gc_writes;
+		if (user_writes > 0) {
+			waf_int = total_writes / user_writes;
+			waf_frac = (total_writes * 1000 / user_writes) % 1000;
+		} else {
+			waf_int = 0;
+			waf_frac = 0;
+		}
+
+		seq_printf(m, "gc_policy: %u\n", nvmev_vdev->config.gc_policy);
+		seq_printf(m, "user_writes: %llu\n", user_writes);
+		seq_printf(m, "gc_writes: %llu\n", gc_writes);
+		seq_printf(m, "total_nand_writes: %llu\n", total_writes);
+		seq_printf(m, "WAF: %llu.%03llu\n", waf_int, waf_frac);
 	} else if (strcmp(filename, "debug") == 0) {
 		/* Left for later use */
 	}
@@ -394,6 +424,14 @@ static ssize_t __proc_file_write(struct file *file, const char __user *buf, size
 				continue;
 
 			memset(&sq->stat, 0x00, sizeof(sq->stat));
+		}
+	} else if (!strcmp(filename, "gc_stat")) {
+		/* Reset GC stat counters */
+		struct nvmev_ns *ns = nvmev_vdev->ns;
+		int i;
+		for (i = 0; i < nvmev_vdev->nr_ns; i++) {
+			if (NS_SSD_TYPE(i) == SSD_TYPE_CONV)
+				conv_reset_gc_stat(&ns[i]);
 		}
 	} else if (!strcmp(filename, "debug")) {
 		/* Left for later use */
@@ -453,6 +491,8 @@ static void NVMEV_STORAGE_INIT(struct nvmev_dev *nvmev_vdev)
 		proc_create("io_units", 0664, nvmev_vdev->proc_root, &proc_file_fops);
 	nvmev_vdev->proc_stat = proc_create("stat", 0444, nvmev_vdev->proc_root, &proc_file_fops);
 	nvmev_vdev->proc_debug = proc_create("debug", 0444, nvmev_vdev->proc_root, &proc_file_fops);
+	nvmev_vdev->proc_gc_stat =
+		proc_create("gc_stat", 0664, nvmev_vdev->proc_root, &proc_file_fops);
 }
 
 static void NVMEV_STORAGE_FINAL(struct nvmev_dev *nvmev_vdev)
@@ -462,6 +502,7 @@ static void NVMEV_STORAGE_FINAL(struct nvmev_dev *nvmev_vdev)
 	remove_proc_entry("io_units", nvmev_vdev->proc_root);
 	remove_proc_entry("stat", nvmev_vdev->proc_root);
 	remove_proc_entry("debug", nvmev_vdev->proc_root);
+	remove_proc_entry("gc_stat", nvmev_vdev->proc_root);
 
 	remove_proc_entry("nvmev", NULL);
 

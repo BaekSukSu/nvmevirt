@@ -614,6 +614,9 @@ static uint64_t gc_write_page(struct conv_ftl *conv_ftl, struct ppa *old_ppa)
 
 	mark_page_valid(conv_ftl, &new_ppa);
 
+	/* WAF: count GC-copied page */
+	conv_ftl->gc_write_count++;
+
 	/* need to advance the write pointer here */
 	advance_write_pointer(conv_ftl, GC_IO);
 
@@ -648,23 +651,24 @@ static uint64_t gc_write_page(struct conv_ftl *conv_ftl, struct ppa *old_ppa)
 /*
  * Age-leveling for cost-benefit GC policy.
  * Converts elapsed time (ns) to a discrete level (1-7).
+ * Millisecond-scale thresholds for fine-grained age discrimination.
  */
-#define AGE_LEVEL_1_NS (2ULL  * 1000000000ULL)
-#define AGE_LEVEL_2_NS (5ULL  * 1000000000ULL)
-#define AGE_LEVEL_3_NS (10ULL * 1000000000ULL)
-#define AGE_LEVEL_4_NS (40ULL * 1000000000ULL)
-#define AGE_LEVEL_5_NS (100ULL * 1000000000ULL)
-#define AGE_LEVEL_6_NS (250ULL * 1000000000ULL)
+#define AGE_LEVEL_1_NS (50ULL   * 100000ULL)   /*  5 ms */
+#define AGE_LEVEL_2_NS (200ULL  * 100000ULL)   /*  20 ms */
+#define AGE_LEVEL_3_NS (500ULL  * 100000ULL)   /*  50 ms */
+#define AGE_LEVEL_4_NS (1000ULL * 100000ULL)   /*  100 ms  */
+#define AGE_LEVEL_5_NS (2000ULL * 100000ULL)   /*  200 ms  */
+#define AGE_LEVEL_6_NS (5000ULL * 100000ULL)   /*  500 ms  */
 
 static unsigned int get_age_level(uint64_t age_ns)
 {
-	if (age_ns < AGE_LEVEL_1_NS) return 1;
-	if (age_ns < AGE_LEVEL_2_NS) return 2;
-	if (age_ns < AGE_LEVEL_3_NS) return 3;
-	if (age_ns < AGE_LEVEL_4_NS) return 4;
-	if (age_ns < AGE_LEVEL_5_NS) return 5;
-	if (age_ns < AGE_LEVEL_6_NS) return 6;
-	return 7;
+	if (age_ns < AGE_LEVEL_1_NS) return 1;   /* < 50ms  */
+	if (age_ns < AGE_LEVEL_2_NS) return 4;   /* < 200ms */
+	if (age_ns < AGE_LEVEL_3_NS) return 9;   /* < 500ms */
+	if (age_ns < AGE_LEVEL_4_NS) return 16;  /* < 1s    */
+	if (age_ns < AGE_LEVEL_5_NS) return 25;  /* < 2s    */
+	if (age_ns < AGE_LEVEL_6_NS) return 36;  /* < 5s    */
+	return 49;                                /* >= 5s   */
 }
 
 static struct line *select_victim_line(struct conv_ftl *conv_ftl, bool force)
@@ -684,6 +688,12 @@ static struct line *select_victim_line(struct conv_ftl *conv_ftl, bool force)
 			return NULL;
 
 		pqueue_pop(lm->victim_line_pq);
+		{
+			uint64_t age_ns = local_clock() - victim_line->create_timestamp;
+			unsigned int age_lvl = get_age_level(age_ns);
+			printk(KERN_INFO "GC_VICTIM greedy line=%d vpc=%d age_ns=%llu age_level=%u\n",
+			       victim_line->id, victim_line->vpc, age_ns, age_lvl);
+		}
 	} else {
 		/* Cost-Benefit: scan all victims, pick max value */
 		pqueue_t *pq = lm->victim_line_pq;
@@ -743,6 +753,12 @@ static struct line *select_victim_line(struct conv_ftl *conv_ftl, bool force)
 		if (!force && (victim_line->vpc > (spp->pgs_per_line / 8)))
 			return NULL;
 
+		{
+			uint64_t age_ns = local_clock() - victim_line->create_timestamp;
+			unsigned int age_lvl = get_age_level(age_ns);
+			printk(KERN_INFO "GC_VICTIM cb line=%d vpc=%d age_ns=%llu age_level=%u\n",
+			       victim_line->id, victim_line->vpc, age_ns, age_lvl);
+		}
 		pqueue_remove(pq, victim_line);
 	}
 
@@ -1082,6 +1098,9 @@ static bool conv_write(struct nvmev_ns *ns, struct nvmev_request *req, struct nv
 
 		mark_page_valid(conv_ftl, &ppa);
 
+		/* WAF: count user-written page */
+		conv_ftl->user_write_count++;
+
 		/* need to advance the write pointer here */
 		advance_write_pointer(conv_ftl, USER_IO);
 
@@ -1133,6 +1152,7 @@ static void conv_flush(struct nvmev_ns *ns, struct nvmev_request *req, struct nv
 
 bool conv_proc_nvme_io_cmd(struct nvmev_ns *ns, struct nvmev_request *req, struct nvmev_result *ret)
 {
+
 	struct nvme_command *cmd = req->cmd;
 
 	NVMEV_ASSERT(ns->csi == NVME_CSI_NVM);
@@ -1156,4 +1176,31 @@ bool conv_proc_nvme_io_cmd(struct nvmev_ns *ns, struct nvmev_request *req, struc
 	}
 
 	return true;
+}
+
+void conv_get_gc_stat(struct nvmev_ns *ns, uint64_t *user_writes, uint64_t *gc_writes)
+{
+	struct conv_ftl *conv_ftls = (struct conv_ftl *)ns->ftls;
+	uint32_t nr_parts = ns->nr_parts;
+	uint32_t i;
+
+	*user_writes = 0;
+	*gc_writes = 0;
+
+	for (i = 0; i < nr_parts; i++) {
+		*user_writes += conv_ftls[i].user_write_count;
+		*gc_writes += conv_ftls[i].gc_write_count;
+	}
+}
+
+void conv_reset_gc_stat(struct nvmev_ns *ns)
+{
+	struct conv_ftl *conv_ftls = (struct conv_ftl *)ns->ftls;
+	uint32_t nr_parts = ns->nr_parts;
+	uint32_t i;
+
+	for (i = 0; i < nr_parts; i++) {
+		conv_ftls[i].user_write_count = 0;
+		conv_ftls[i].gc_write_count = 0;
+	}
 }

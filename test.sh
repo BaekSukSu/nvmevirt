@@ -1,78 +1,58 @@
 #!/bin/bash
-TARGET_DEV=/home/inho/mnt/hot_cold_file
 
-# 안전을 위해 기존 파일 삭제
-sudo rm -f $TARGET_DEV
+# === 환경 설정 ===
+MOUNT="/home/inho/mnt"
+FILE="${MOUNT}/testfile.dat"
+# 2GB storage, OP 7%, ext4 overhead ~5%  → 안전하게 1.5G 단일 파일 사용
+TOTAL_SIZE="1536M"
+HOT_SIZE="150M"                    # Honey Pot 구역 크기 (약 10%)
+IO_PER_PHASE="1024M"               # 각 페이즈당 쏟아부을 I/O 양 (GC 유발용)
 
-echo "=================================================="
-echo "Phase 1: Full Sequential Fill (Clean Start)"
-echo "=================================================="
-# 1. 일단 10GB를 순차적으로 꽉 채웁니다. (모든 블록 Valid 100%)
-sudo fio --name=fill \
-    --filename=$TARGET_DEV \
-    --direct=1 \
-    --ioengine=libaio \
-    --rw=write \
-    --bs=128k \
-    --size=10G \
-    --numjobs=1 \
-    --fsync=1
+echo "기존 테스트 데이터 파일을 정리합니다..."
+rm -f ${MOUNT}/testfile.dat ${MOUNT}/base_fill* ${MOUNT}/honeypot.dat
+echo "정리 완료."
+
+# 1. 기초 다지기 (Cold Baseline)
+# 단일 파일로 전체 영역을 순차적으로 채워 모든 블록을 Valid Page로 가득 채웁니다.
+echo "Step 1: Sequential Fill (${TOTAL_SIZE})..."
+fio --name=base_fill --filename=${FILE} --direct=1 --ioengine=libaio \
+    --rw=write --bs=128k --size=${TOTAL_SIZE} --numjobs=1 --group_reporting
 
 if [ $? -ne 0 ]; then
     echo "Error: Fill phase failed."
     exit 1
 fi
 
-echo "=================================================="
-echo "Phase 2: Dirtying the Cold Region (Fragmentation)"
-echo "=================================================="
-# 2. [핵심] 나중에 Cold가 될 영역(2G~10G)을 미리 '더럽힙니다'.
-#    - 무작위 쓰기를 통해 물리 블록 내에 Invalid Page(구멍)를 만듭니다.
-#    - io_size=8G : 해당 영역 크기만큼 덮어써서 충분히 파편화시킵니다.
-sudo fio --name=pre_dirty_cold \
-    --filename=$TARGET_DEV \
-    --direct=1 \
-    --ioengine=libaio \
-    --rw=randwrite \
-    --bs=4k \
-    --offset=2G \
-    --size=8G \
-    --io_size=8G \
-    --numjobs=1 \
-    --allow_file_create=0
+# 2. 첫 번째 Honey Pot 생성 (Region A: 0~150M)
+# 같은 파일의 0~150M 구역에 쓰기를 집중합니다.
+# 이 구역의 블록들은 '최근에 쓰인 Hot + 낮은 VPC' 상태가 됩니다.
+echo "Step 2: Making Honey Pot A (0 ~ ${HOT_SIZE})..."
+fio --filename=${FILE} --direct=1 --ioengine=libaio \
+    --rw=randwrite --bs=4k --size=${HOT_SIZE} --offset=0 \
+    --random_distribution=zipf:1.2 --io_size=${IO_PER_PHASE} \
+    --name=hot_a --group_reporting --allow_file_create=0
 
-echo "=================================================="
-echo "Phase 3: Hot/Cold Workload (Actual Test)"
-echo "=================================================="
+echo "Step 2 완료. Region A aging을 위해 10초 대기..."
+sleep 5
 
-# 3. 실제 테스트: Hot은 미친듯이 쓰고, Cold는 거의 안 씁니다.
-#    - Cold 영역은 Phase 2에서 이미 '더러워진(Invalid mixed)' 상태입니다.
-#    - 시간이 지날수록 Age가 증가합니다.
-#    - CB 알고리즘은 Age가 높고 Invalid가 섞인 이 Cold 블록들을 선택하게 됩니다.
-sudo fio - <<EOF
-[global]
-filename=$TARGET_DEV
-direct=1
-ioengine=libaio
-bs=4k
-norandommap=1
-randrepeat=0
-group_reporting
-time_based=1
-runtime=300
-allow_file_create=0
+# 3. 쓰기 지점 이동 (Region B: 150M~300M)
+# 이제 Region A는 방치됩니다. 시간이 흐르며 Region A의 Age는 올라갑니다 (Honey Pot 완성).
+# Greedy는 VPC가 낮은 line을 우선하고, C-B는 Age가 높은 line을 더 선호합니다.
+echo "Step 3: Moving Hot Spot to Region B (${HOT_SIZE} ~ 300M)..."
+fio --filename=${FILE} --direct=1 --ioengine=libaio \
+    --rw=randwrite --bs=4k --size=${HOT_SIZE} --offset=${HOT_SIZE} \
+    --random_distribution=zipf:1.2 --io_size=${IO_PER_PHASE} \
+    --name=hot_b --group_reporting --allow_file_create=0
 
-[hot_job]
-rw=randwrite
-offset=0
-size=2G
-rate_iops=15000     ; Hot 영역은 계속 덮어써서 GC 유발
-numjobs=1
+echo "Step 3 완료. Region B aging을 위해 10초 대기..."
+sleep 5
 
-[cold_job]
-rw=randwrite
-offset=2G
-size=8G
-rate_iops=50       ; [중요] Cold는 아주 가끔만 건드림 (Age 증가 유도)
-numjobs=1
-EOF
+# 4. 최종 혼합 워크로드 (성능 측정 구간)
+# 전체 영역에 대해 쓰기를 수행하며 GC 정책간의 WAF 차이를 극명하게 확인합니다.
+echo "Step 4: Final Stress Test (Full Range)..."
+fio --filename=${FILE} --direct=1 --ioengine=libaio \
+    --rw=randwrite --bs=4k --size=${TOTAL_SIZE} \
+    --random_distribution=zipf:1.1 --io_size=2G \
+    --name=final_stress --group_reporting --allow_file_create=0
+
+echo "테스트 완료!"

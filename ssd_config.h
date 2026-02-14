@@ -76,7 +76,7 @@ enum {
 #define PLNS_PER_LUN (1)
 #define FLASH_PAGE_SIZE KB(32)
 #define ONESHOT_PAGE_SIZE (FLASH_PAGE_SIZE * 1)
-#define BLKS_PER_PLN (8192)
+#define BLKS_PER_PLN (1024)
 #define BLK_SIZE (0) /*BLKS_PER_PLN should not be 0 */
 static_assert((ONESHOT_PAGE_SIZE % FLASH_PAGE_SIZE) == 0);
 

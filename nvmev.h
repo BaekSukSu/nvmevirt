@@ -261,6 +261,7 @@ struct nvmev_dev {
 	struct proc_dir_entry *proc_io_units;
 	struct proc_dir_entry *proc_stat;
 	struct proc_dir_entry *proc_debug;
+	struct proc_dir_entry *proc_gc_stat;
 
 	unsigned long long *io_unit_stat;
 };
