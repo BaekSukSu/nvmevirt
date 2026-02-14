@@ -653,22 +653,22 @@ static uint64_t gc_write_page(struct conv_ftl *conv_ftl, struct ppa *old_ppa)
  * Converts elapsed time (ns) to a discrete level (1-7).
  * Millisecond-scale thresholds for fine-grained age discrimination.
  */
-#define AGE_LEVEL_1_NS (50ULL   * 100000ULL)   /*  5 ms */
-#define AGE_LEVEL_2_NS (200ULL  * 100000ULL)   /*  20 ms */
-#define AGE_LEVEL_3_NS (500ULL  * 100000ULL)   /*  50 ms */
-#define AGE_LEVEL_4_NS (1000ULL * 100000ULL)   /*  100 ms  */
-#define AGE_LEVEL_5_NS (2000ULL * 100000ULL)   /*  200 ms  */
-#define AGE_LEVEL_6_NS (5000ULL * 100000ULL)   /*  500 ms  */
+#define AGE_LEVEL_1_NS (25ULL   * 1000000ULL)   /*  25 ms */
+#define AGE_LEVEL_2_NS (100ULL  * 1000000ULL)   /*  100 ms */
+#define AGE_LEVEL_3_NS (250ULL  * 1000000ULL)   /*  250 ms */
+#define AGE_LEVEL_4_NS (500ULL * 1000000ULL)   /*  500 ms  */
+#define AGE_LEVEL_5_NS (1000ULL * 1000000ULL)   /*  1000 ms  */
+#define AGE_LEVEL_6_NS (2500ULL * 1000000ULL)   /*  2500 ms  */
 
 static unsigned int get_age_level(uint64_t age_ns)
 {
-	if (age_ns < AGE_LEVEL_1_NS) return 1;   /* < 50ms  */
-	if (age_ns < AGE_LEVEL_2_NS) return 4;   /* < 200ms */
-	if (age_ns < AGE_LEVEL_3_NS) return 9;   /* < 500ms */
-	if (age_ns < AGE_LEVEL_4_NS) return 16;  /* < 1s    */
-	if (age_ns < AGE_LEVEL_5_NS) return 25;  /* < 2s    */
-	if (age_ns < AGE_LEVEL_6_NS) return 36;  /* < 5s    */
-	return 49;                                /* >= 5s   */
+	if (age_ns < AGE_LEVEL_1_NS) return 1;   /* < 25ms  */
+	if (age_ns < AGE_LEVEL_2_NS) return 4;   /* < 100ms */
+	if (age_ns < AGE_LEVEL_3_NS) return 9;   /* < 250ms */
+	if (age_ns < AGE_LEVEL_4_NS) return 16;  /* < 500ms    */
+	if (age_ns < AGE_LEVEL_5_NS) return 25;  /* < 1000ms    */
+	if (age_ns < AGE_LEVEL_6_NS) return 36;  /* < 2500ms    */
+	return 49;                                /* >= 2500ms   */
 }
 
 static struct line *select_victim_line(struct conv_ftl *conv_ftl, bool force)

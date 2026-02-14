@@ -32,7 +32,7 @@ fio --filename=${FILE} --direct=1 --ioengine=libaio \
     --random_distribution=zipf:1.2 --io_size=${IO_PER_PHASE} \
     --name=hot_a --group_reporting --allow_file_create=0
 
-echo "Step 2 완료. Region A aging을 위해 10초 대기..."
+echo "Step 2 완료. Region A aging을 위해 5초 대기..."
 sleep 5
 
 # 3. 쓰기 지점 이동 (Region B: 150M~300M)
@@ -44,7 +44,7 @@ fio --filename=${FILE} --direct=1 --ioengine=libaio \
     --random_distribution=zipf:1.2 --io_size=${IO_PER_PHASE} \
     --name=hot_b --group_reporting --allow_file_create=0
 
-echo "Step 3 완료. Region B aging을 위해 10초 대기..."
+echo "Step 3 완료. Region B aging을 위해 5초 대기..."
 sleep 5
 
 # 4. 최종 혼합 워크로드 (성능 측정 구간)
